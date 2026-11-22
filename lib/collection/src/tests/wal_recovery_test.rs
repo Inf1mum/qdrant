@@ -858,21 +858,41 @@ async fn test_wal_replay_tolerates_corrupt_tail_entry() {
 
     // The update worker must drain the queued tail past the corrupt entry (it skips it the same
     // way: log and continue).
-    let timeout = std::time::Duration::from_secs(2);
-    let start = std::time::Instant::now();
-    let poll_interval = std::time::Duration::from_millis(10);
+    //
+    // This used to be polled against a fixed 2s wall-clock timeout, which flaked on loaded
+    // windows-latest runners (#10103): draining the tail is only as fast as the single update
+    // worker is, and each queued entry costs it several blocking-pool hops — a raw WAL read under
+    // the WAL lock, the segment apply, the applied_seq persistence every 64 ops — plus an
+    // optimizer signal. Under CI load those hops stretch, the queue legitimately takes longer
+    // than 2s to empty, and the timeout aborts a recovery that was proceeding correctly (the CI
+    // log right before the panic shows the corrupt entry being detected and skipped as designed).
+    //
+    // Use the update channel itself as the barrier instead: it is FIFO with a single consumer
+    // (the update worker), so a no-op delete submitted after `load` returns can only be applied
+    // after every entry queued by `load_from_wal` — including the skipped corrupt one — has been
+    // processed. Waiting for that operation's completion proves the queue drained exactly, with
+    // no wall-clock bound to overshoot; the same pattern as
+    // `test_old_wal_filter_op_replays_with_apply_semantics` below. `WaitUntil::Segment` keeps the
+    // barrier decoupled from the optimizer, which the drain does not depend on.
+    shard
+        .update(
+            CollectionUpdateOperations::PointOperation(PointOperations::DeletePoints {
+                ids: vec![999.into()], // no-op: the point does not exist
+            })
+            .into(),
+            WaitUntil::Segment,
+            None,
+        )
+        .measured(AmbientContext::new())
+        .await
+        .unwrap();
 
-    while shard.local_update_queue_info().await.length > 0 {
-        assert!(
-            start.elapsed() <= timeout,
-            "Timeout waiting for update queue to empty"
-        );
-        tokio::time::sleep(poll_interval).await;
-    }
-
-    // Channel length reaching zero only means the last operation was received,
-    // not that it finished applying; wait for the worker to go idle.
-    shard.plunge_async().await.unwrap().await.unwrap();
+    // The barrier was applied, so the queue must be provably empty.
+    assert_eq!(
+        shard.local_update_queue_info().await.length,
+        0,
+        "update queue must be empty once the barrier operation completed",
+    );
 
     // Every readable operation around the corrupt entry is applied.
     let info = shard.info().await.unwrap();
