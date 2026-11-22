@@ -4,7 +4,7 @@ use common::ambient;
 use parking_lot::RwLock;
 use segment::data_types::vectors::{DEFAULT_VECTOR_NAME, only_default_vector};
 use segment::entry::ReadSegmentEntry as _;
-use segment::entry::entry_point::SegmentEntry as _;
+use segment::entry::entry_point::{SegmentEntry as _, StorageSegmentEntry as _};
 use segment::payload_json;
 use segment::types::{
     Condition, FieldCondition, Filter, Match, MatchValue, PayloadKeyType, PointIdType,
@@ -844,6 +844,151 @@ fn test_upsert_cow_move_replaces_whole_point() {
     upsert_points(&holder, 101, [&incoming], None).unwrap();
     let segment = holder.get(sid).unwrap().get();
     check(&*segment.read(), "CoW move");
+}
+
+/// Regression test for [#11632](https://github.com/qdrant/qdrant/issues/11632):
+/// upserts that overwrite points living in a non-appendable segment took the
+/// CoW-move arm, which read the full old record (all vectors plus payload)
+/// from the immutable segment and immediately discarded it — one full-record
+/// read per overwritten point, which dominates the update cost once the
+/// records are not in the page cache.
+///
+/// The upsert move carries the complete new point, so it must not read the
+/// old record at all: the overwrite below must not bump the payload IO
+/// counter of the source segment's payload storage.
+///
+/// This is observable because a cold `PayloadStorageType::Mmap` payload
+/// storage (gridstore) bumps `HwMetric::PayloadIoRead` on every record read,
+/// regardless of whether the read is served from the page cache.
+#[test]
+fn test_upsert_cow_move_does_not_read_old_record() {
+    use std::collections::HashMap;
+
+    use common::ambient::hw::{HwMetric, pending};
+    use segment::segment_constructor::build_segment;
+    use segment::types::{
+        Distance, Indexes, PayloadStorageType, SegmentConfig, VectorDataConfig, VectorStorageType,
+    };
+
+    use crate::operations::point_ops::{
+        PointStructPersisted, VectorPersisted, VectorStructPersisted,
+    };
+    use crate::update::upsert_points;
+
+    const DIM: usize = 8;
+    const POINTS: u64 = 4;
+
+    let config = SegmentConfig {
+        vector_data: HashMap::from([(
+            DEFAULT_VECTOR_NAME.to_owned(),
+            VectorDataConfig {
+                size: DIM,
+                distance: Distance::Dot,
+                storage_type: VectorStorageType::ChunkedMmap,
+                index: Indexes::Plain {},
+                quantization_config: None,
+                multivector_config: None,
+                datatype: None,
+            },
+        )]),
+        sparse_vector_data: Default::default(),
+        // Cold gridstore payload storage: its reads bump the IO counter.
+        payload_storage_type: PayloadStorageType::Mmap,
+        id_tracker_memory: None,
+    };
+
+    let dir = Builder::new().prefix("segment_dir").tempdir().unwrap();
+    let _scope = ambient::test_guard();
+
+    let seed = |segment: &mut segment::segment::Segment| {
+        for i in 0..POINTS {
+            let point_id: PointIdType = (i + 1).into();
+            let vector: Vec<f32> = (0..DIM as u64)
+                .map(|j| ((i * 10 + j) as f32) * 0.1)
+                .collect();
+            segment
+                .upsert_point(100, point_id, only_default_vector(&vector))
+                .unwrap();
+            // A multi-field payload, so a pre-fill read is clearly measurable.
+            segment
+                .set_payload(
+                    100,
+                    point_id,
+                    &payload_json! {"text": "filler payload for read accounting", "group": i},
+                    &None,
+                )
+                .unwrap();
+        }
+        segment.flush(true).unwrap();
+    };
+
+    let incoming = |i: u64| PointStructPersisted {
+        id: (i + 1).into(),
+        vector: VectorStructPersisted::Named(HashMap::from([(
+            DEFAULT_VECTOR_NAME.to_owned(),
+            VectorPersisted::Dense(vec![(i as f32) + 1.0; DIM]),
+        )])),
+        payload: Some(payload_json! {"text": "overwritten", "group": i}),
+    };
+
+    // Oracle: in-place overwrite into an appendable segment never reads the
+    // old record (`Segment::upsert_point` replaces it wholesale).
+    let mut in_place = build_segment(dir.path(), &config, None, true).unwrap().0;
+    seed(&mut in_place);
+    let mut holder = SegmentHolder::default();
+    let _sid = holder.add_new(in_place);
+    let incoming_points: Vec<_> = (0..POINTS).map(incoming).collect();
+    let before = pending()[HwMetric::PayloadIoRead];
+    upsert_points(&holder, 101, incoming_points.iter(), None).unwrap();
+    let in_place_read = pending()[HwMetric::PayloadIoRead] - before;
+    assert_eq!(
+        in_place_read, 0,
+        "in-place upsert must not read the old record",
+    );
+
+    // CoW move: the points' segment is non-appendable, so the overwrite must
+    // move them into the appendable destination — without reading the old
+    // records.
+    let mut source = build_segment(dir.path(), &config, None, true).unwrap().0;
+    seed(&mut source);
+    source.appendable_flag = false;
+    let destination = build_segment(dir.path(), &config, None, true).unwrap().0;
+    let mut holder = SegmentHolder::default();
+    holder.add_new(source);
+    let sid = holder.add_new(destination);
+    let incoming_points: Vec<_> = (0..POINTS).map(incoming).collect();
+
+    let before = pending()[HwMetric::PayloadIoRead];
+    upsert_points(&holder, 101, incoming_points.iter(), None).unwrap();
+    let cow_read = pending()[HwMetric::PayloadIoRead] - before;
+    assert_eq!(
+        cow_read, 0,
+        "upsert CoW move must not read the old record it discards (#11632)",
+    );
+
+    // Correctness: the destination holds the new vectors and payloads.
+    let segment = holder.get(sid).unwrap().get();
+    let segment = segment.read();
+    for i in 0..POINTS {
+        let point_id: PointIdType = (i + 1).into();
+        let vector = segment
+            .vector(DEFAULT_VECTOR_NAME, point_id)
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(
+                vector,
+                segment::data_types::vectors::VectorInternal::Dense(_)
+            ),
+            "moved point must carry the upserted vector",
+        );
+        let payload = segment.payload(point_id).unwrap();
+        assert_eq!(
+            payload.0.get("group").and_then(|v| v.as_u64()),
+            Some(i),
+            "moved point must carry the upserted payload",
+        );
+    }
 }
 
 /// Failure-direction regression test for the payload index durability fix: an

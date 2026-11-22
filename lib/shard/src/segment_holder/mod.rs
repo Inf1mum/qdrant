@@ -50,6 +50,21 @@ pub type SegmentId = usize;
 /// All occurrences of a point across segments: (segment_id, version, is_deferred).
 type PointOccurrences = SmallVec<[(SegmentId, SeqNumberType, bool); 2]>;
 
+/// Whether a copy-on-write point move needs the old record of the point.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CowPrefill {
+    /// The move merges into the existing vectors/payload (e.g. `SetPayload`,
+    /// `UpdateVectors`): read the old record and pre-fill the move buffers
+    /// with it.
+    MergeInto,
+    /// The move writes a complete new point (e.g. a plain upsert): the old
+    /// record is not needed, skip reading it. Overwrites of points living in
+    /// immutable segments otherwise pay one full-record read per point on the
+    /// update path — several times the write cost itself on disk-bound
+    /// storage (#11632).
+    Replace,
+}
+
 /// Result of running a [`DeferredAction`].
 pub enum PostFlushOutcome {
     /// The action completed and should be removed from the queue.
@@ -1124,6 +1139,7 @@ impl SegmentHolder {
         ids: &[PointIdType],
         mut point_operation: F,
         mut point_cow_operation: G,
+        cow_prefill: CowPrefill,
         max_segment_size_bytes: Option<NonZeroUsize>,
     ) -> OperationResult<AHashSet<PointIdType>>
     where
@@ -1166,40 +1182,60 @@ impl SegmentHolder {
                             .lock()
                             .add_dependency(idx, appendable_idx, op_num);
 
-                        // Read the latest head of the point, including a
-                        // deferred head that is invisible to ordinary
-                        // (`VisibleOnly`) reads. A deferred source point would
-                        // otherwise yield no record, surfacing as a spurious
-                        // "No point with id ... found" on a plain upsert that
-                        // races a `prevent_unoptimized` optimization.
+                        // Whole-point replaces (`CowPrefill::Replace`) carry the
+                        // complete new point, so the old record they would
+                        // overwrite is read and immediately discarded. Skip that
+                        // read entirely: it is pure IO on the immutable-segment
+                        // overwrite path, reading vectors and payload the
+                        // operation throws away (see #11632). Merge-style moves
+                        // (`CowPrefill::MergeInto`) need the old record to merge
+                        // into.
+                        //
+                        // When the record is read, read the latest head of the
+                        // point, including a deferred head that is invisible to
+                        // ordinary (`VisibleOnly`) reads. A deferred source point
+                        // would otherwise yield no record, surfacing as a
+                        // spurious "No point with id ... found" on a plain
+                        // upsert that races a `prevent_unoptimized`
+                        // optimization.
                         //
                         // Vectors are read as storage-native bytes: names the
                         // operation does not touch travel verbatim, avoiding
                         // the lossy dequantize→requantize round-trip of
                         // TurboQuant-as-datatype storages.
-                        let mut record = write_segment
-                            .retrieve_raw(
-                                &[point_id],
-                                &WithVector::Bool(true),
+                        let (mut raw_vectors, mut updated_vectors, mut payload) =
+                            match cow_prefill {
+                                CowPrefill::MergeInto => {
+                                    let mut record = write_segment
+                                        .retrieve_raw(
+                                            &[point_id],
+                                            &WithVector::Bool(true),
 
-                                &stopped,
-                                DeferredBehavior::WithDeferred,
-                            )?
-                            .remove(&point_id)
-                            .ok_or(OperationError::PointIdError {
-                                missed_point_id: point_id,
-                            })?;
+                                            &stopped,
+                                            DeferredBehavior::WithDeferred,
+                                        )?
+                                        .remove(&point_id)
+                                        .ok_or(OperationError::PointIdError {
+                                            missed_point_id: point_id,
+                                        })?;
 
-                        let mut raw_vectors = record.vectors.take().unwrap_or_default();
-                        // The `SetPayload` callback below merges into the parsed
-                        // payload, so a stored blob is decoded here.
-                        let mut payload = record
-                            .payload
-                            .as_ref()
-                            .map(RawPayload::decode)
-                            .transpose()?
-                            .unwrap_or_default();
-                        let mut updated_vectors = NamedVectors::default();
+                                    let raw_vectors = record.vectors.take().unwrap_or_default();
+                                    // The `SetPayload` callback below merges into the parsed
+                                    // payload, so a stored blob is decoded here.
+                                    let payload = record
+                                        .payload
+                                        .as_ref()
+                                        .map(RawPayload::decode)
+                                        .transpose()?
+                                        .unwrap_or_default();
+                                    (raw_vectors, NamedVectors::default(), payload)
+                                }
+                                CowPrefill::Replace => (
+                                    SmallVec::new(),
+                                    NamedVectors::default(),
+                                    Payload::default(),
+                                ),
+                            };
 
                         point_cow_operation(
                             point_id,

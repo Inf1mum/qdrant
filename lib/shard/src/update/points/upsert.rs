@@ -14,7 +14,7 @@ use crate::operations::point_ops::{
     ConditionalInsertOperationInternal, PointInsertOperationsInternal, PointStructPersisted,
     PointStructRawPersisted, UpdateMode,
 };
-use crate::segment_holder::SegmentHolder;
+use crate::segment_holder::{CowPrefill, SegmentHolder};
 use crate::update::helpers::select_excluded_by_filter_ids;
 
 /// Do not insert more than this number of points in a single update operation chunk
@@ -223,6 +223,9 @@ where
             |id, raw_vectors, updated_vectors, old_payload| {
                 points_map[&id].write_moved(raw_vectors, updated_vectors, old_payload)
             },
+            // An upsert writes the complete new point, so the move does not
+            // need the old record: skip reading it (#11632).
+            CowPrefill::Replace,
             max_segment_size_bytes,
         )?;
 

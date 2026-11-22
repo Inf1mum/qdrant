@@ -65,6 +65,7 @@ fn test_apply_to_appendable() {
             |point_id, _, _, _| {
                 moved_to_appendable.push(point_id);
             },
+            CowPrefill::MergeInto,
             None,
         )
     })
@@ -185,6 +186,7 @@ fn test_apply_and_move_old_versions(
                 Ok(true)
             },
             |point_id, _, _, _| processed_points2.push(point_id),
+            CowPrefill::MergeInto,
             None,
         )
         .unwrap();
@@ -275,6 +277,7 @@ fn test_cow_operation() {
                 );
                 payload.0.insert(PAYLOAD_KEY.to_string(), 2.into());
             },
+            CowPrefill::MergeInto,
             None,
         )
         .unwrap();
@@ -338,6 +341,7 @@ fn test_cow_move_append_only_single_slot() {
                 );
                 payload.0.insert(PAYLOAD_KEY.to_string(), 2.into());
             },
+            CowPrefill::MergeInto,
             None,
         )
         .unwrap();
@@ -458,6 +462,7 @@ fn test_cow_move_does_not_degrade_turbo_vectors() {
                 &[point_id],
                 |_, _| unreachable!("the point's segment is non-appendable, it must be moved"),
                 |_, _, _, _| {}, // no-op: a pure move
+                CowPrefill::MergeInto,
                 None,
             )
             .unwrap();
@@ -584,6 +589,7 @@ fn test_cow_move_overlay_preserves_untouched_turbo_vector() {
                     VectorInternal::Dense(fresh_replace.clone()),
                 );
             },
+            CowPrefill::MergeInto,
             None,
         )
         .unwrap();
@@ -678,6 +684,7 @@ fn test_cow_move_delete_name_preserves_survivor() {
             |_, raw_vectors, _, _| {
                 raw_vectors.retain(|(name, _)| name != DROP);
             },
+            CowPrefill::MergeInto,
             None,
         )
         .unwrap();
@@ -772,6 +779,7 @@ fn test_cow_move_allows_role_config_differences() {
             &[point_id],
             |_, _| unreachable!("the point's segment is non-appendable, it must be moved"),
             |_, _, _, _| {}, // no-op: a pure move
+            CowPrefill::MergeInto,
             None,
         )
         .unwrap();
@@ -1943,6 +1951,7 @@ fn test_cow_skips_delete_when_destination_is_deferred() {
             &[100.into()],
             |_, _| unreachable!("point is in non-appendable, should take CoW path"),
             |_, _, _, _| {},
+            CowPrefill::MergeInto,
             None,
         )
         .unwrap();
@@ -2110,6 +2119,7 @@ fn test_cow_deletes_source_when_destination_is_not_deferred() {
             &[100.into()],
             |_, _| unreachable!("point is in non-appendable, should take CoW path"),
             |_, _, _, _| {},
+            CowPrefill::MergeInto,
             None,
         )
         .unwrap();
@@ -2191,6 +2201,7 @@ fn test_cow_move_prefers_appendable_segment_below_size_cap() {
             &[11.into()],
             |_, _| unreachable!("the point's segment is non-appendable, it must be moved"),
             |_, _, _, _| {},
+            CowPrefill::MergeInto,
             NonZeroUsize::new(full_size),
         )
         .unwrap();
@@ -2258,6 +2269,7 @@ fn test_cow_move_into_capped_deferred_staging_segment_keeps_point_visible() {
             &[100.into()],
             |_, _| unreachable!("the point's segment is non-appendable, it must be moved"),
             |_, _, _, _| {},
+            CowPrefill::MergeInto,
             NonZeroUsize::new(staging_size),
         )
         .expect("Staging segment at the cap should still accept the move");
@@ -2315,6 +2327,7 @@ fn test_cow_move_prefers_uncapped_segment_over_full_deferred_staging_segment() {
             &[100.into()],
             |_, _| unreachable!("the point's segment is non-appendable, it must be moved"),
             |_, _, _, _| {},
+            CowPrefill::MergeInto,
             NonZeroUsize::new(staging_size),
         )
         .unwrap();
@@ -2415,6 +2428,7 @@ fn test_flush_up_to_keeps_cow_dependency_past_the_bound() {
             &[100.into()],
             |_, _| unreachable!("the point's segment is non-appendable, it must be moved"),
             |_, _, _, _| {},
+            CowPrefill::MergeInto,
             None,
         )
         .unwrap();
@@ -2973,6 +2987,7 @@ fn test_cow_move_skips_destinations_that_would_form_a_flush_cycle() {
             &[11.into()],
             |_, _| unreachable!("the point's segment is non-appendable, it must be moved"),
             |_, _, _, _| {},
+            CowPrefill::MergeInto,
             None,
         )
         .unwrap();
@@ -3028,6 +3043,7 @@ fn test_cow_move_falls_back_when_every_destination_would_form_a_cycle() {
             &[11.into()],
             |_, _| unreachable!("the point's segment is non-appendable, it must be moved"),
             |_, _, _, _| {},
+            CowPrefill::MergeInto,
             None,
         )
         .unwrap();

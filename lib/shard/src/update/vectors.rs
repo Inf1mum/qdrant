@@ -9,7 +9,7 @@ use segment::types::{Filter, PointIdType, SeqNumberType, VectorNameBuf};
 
 use super::helpers::{check_unprocessed_points, points_by_filter, select_excluded_by_filter_ids};
 use crate::operations::vector_ops::{PointVectorsPersisted, UpdateVectorsOp};
-use crate::segment_holder::SegmentHolder;
+use crate::segment_holder::{CowPrefill, SegmentHolder};
 
 /// Batch size when modifying vector
 const VECTOR_OP_BATCH_SIZE: usize = 32;
@@ -70,6 +70,7 @@ fn update_vectors(
                     updated_vectors.insert_ref(vector_name, vector_ref);
                 }
             },
+            CowPrefill::MergeInto,
             max_segment_size_bytes,
         )?;
         check_unprocessed_points(batch, &updated_points)?;
@@ -109,6 +110,7 @@ pub fn delete_vectors(
             |_, raw_vectors, _, _| {
                 raw_vectors.retain(|(name, _)| !vector_names.contains(name));
             },
+            CowPrefill::MergeInto,
             max_segment_size_bytes,
         )?;
         check_unprocessed_points(batch, &modified_points)?;

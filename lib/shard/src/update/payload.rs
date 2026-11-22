@@ -7,7 +7,7 @@ use segment::json_path::JsonPath;
 use segment::types::{Filter, Payload, PayloadKeyType, PointIdType, SeqNumberType};
 
 use super::helpers::{check_unprocessed_points, points_by_filter};
-use crate::segment_holder::SegmentHolder;
+use crate::segment_holder::{CowPrefill, SegmentHolder};
 
 /// Batch size when modifying payload
 pub(crate) const PAYLOAD_OP_BATCH_SIZE: usize = 32;
@@ -31,6 +31,7 @@ pub fn set_payload(
                 Some(key) => old_payload.merge_by_key(payload, key),
                 None => old_payload.merge(payload),
             },
+            CowPrefill::MergeInto,
             max_segment_size_bytes,
         )?;
 
@@ -99,6 +100,7 @@ pub fn delete_payload(
                     payload.remove(key);
                 }
             },
+            CowPrefill::MergeInto,
             max_segment_size_bytes,
         )?;
 
@@ -154,6 +156,7 @@ pub fn clear_payload(
             batch,
             |id, write_segment| write_segment.clear_payload(op_num, id),
             |_, _, _, payload| payload.0.clear(),
+            CowPrefill::MergeInto,
             max_segment_size_bytes,
         )?;
         check_unprocessed_points(batch, &updated_points)?;
@@ -205,6 +208,7 @@ pub fn overwrite_payload(
             |_, _, _, old_payload| {
                 *old_payload = payload.clone();
             },
+            CowPrefill::MergeInto,
             max_segment_size_bytes,
         )?;
 
