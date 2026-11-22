@@ -11,7 +11,7 @@ use crate::vector_storage::common::CHUNK_SIZE;
 const CONFIG_FILE_NAME: &str = "config.json";
 const STATUS_FILE_NAME: &str = "status.dat";
 
-pub(super) const MMAP_CHUNKS_PATTERN_START: &str = "chunk_";
+pub(super) const MMAP_CHUNKS_PATTERN_START: &str = super::CHUNK_FILE_PREFIX;
 // TODO: rename for other storages?
 pub(super) const MMAP_CHUNKS_PATTERN_END: &str = ".mmap";
 

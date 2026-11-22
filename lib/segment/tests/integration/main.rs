@@ -5,6 +5,7 @@ mod batch_search_test;
 mod bm25_compare;
 mod byte_storage_hnsw_test;
 mod byte_storage_quantization_test;
+mod crud_empty_vector_reopen_test;
 mod disbalanced_vectors_test;
 mod exact_search_test;
 mod fail_recovery_test;

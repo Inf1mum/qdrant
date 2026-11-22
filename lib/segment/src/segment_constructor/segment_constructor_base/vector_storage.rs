@@ -4,18 +4,21 @@ use common::mmap::{Advice, AdviceSetting};
 
 use crate::common::operation_error::{OperationError, OperationResult};
 use crate::types::{
-    Memory, SparseVectorStorageType, VectorDataConfig, VectorStorageDatatype, VectorStorageType,
+    Indexes, Memory, SparseVectorStorageType, VectorDataConfig, VectorStorageDatatype,
+    VectorStorageType,
 };
-use crate::vector_storage::VectorStorageEnum;
+use crate::vector_storage::dense::appendable_dense_vector_storage::VECTORS_DIR_PATH;
 use crate::vector_storage::dense::dense_vector_storage::{
     open_dense_vector_storage, open_dense_vector_storage_byte, open_dense_vector_storage_half,
 };
+use crate::vector_storage::dense::empty_dense_vector_storage::new_empty_dense_vector_storage;
 use crate::vector_storage::graph_inline::open_graph_inline_vector_storage;
 use crate::vector_storage::multi_dense::appendable_mmap_multi_dense_vector_storage::{
     open_appendable_memmap_multi_vector_storage, open_appendable_memmap_vector_storage,
 };
 use crate::vector_storage::sparse::mmap_sparse_vector_storage::MmapSparseVectorStorage;
 use crate::vector_storage::turbo::{open_turbo_vector_storage, tq_bits};
+use crate::vector_storage::{CHUNK_FILE_PREFIX, VectorStorageEnum};
 
 fn open_mmap_vector_storage(
     vector_storage_path: &Path,
@@ -141,6 +144,69 @@ pub(crate) fn open_vector_storage(
         VectorStorageType::GraphInline => {
             open_graph_inline_vector_storage(vector_storage_path, vector_index_path, vector_config)
         }
+    }
+}
+
+/// Open a dense vector storage during segment load.
+///
+/// A named vector added via CRUD (`create_vector_name`) materializes real
+/// storage only in appendable segments; non-appendable ones keep the in-memory
+/// `EmptyDense` placeholder and write nothing to disk. On load that state was
+/// not restored: the real chunked storage was opened for the empty directory,
+/// preallocating its chunks to `CHUNK_SIZE` and pre-filling one zeroed, deleted
+/// slot per point — with the writes faulting the data into RAM and
+/// `InRamChunkedMmap` additionally populating everything it opens — although a
+/// non-appendable segment can never hold an alive vector for it. Restore the
+/// placeholder instead whenever the segment is non-appendable and carries no
+/// chunk files for this vector.
+pub(crate) fn open_dense_vector_storage_on_load(
+    vector_config: &VectorDataConfig,
+    vector_storage_path: &Path,
+    vector_index_path: &Path,
+    appendable: bool,
+    point_count: usize,
+) -> OperationResult<VectorStorageEnum> {
+    // Only the storage types `create_vector_name` ever opens for an appendable
+    // segment, with the Plain index it always persists. Anything else predates
+    // or bypasses the CRUD flow and keeps the plain open path.
+    let may_be_placeholder = !appendable
+        && vector_config.index == Indexes::Plain {}
+        && matches!(
+            vector_config.storage_type,
+            VectorStorageType::ChunkedMmap | VectorStorageType::InRamChunkedMmap
+        );
+
+    if may_be_placeholder && !chunked_storage_has_chunks(vector_storage_path) {
+        return Ok(new_empty_dense_vector_storage(
+            vector_config.size,
+            vector_config.distance,
+            vector_config.datatype.unwrap_or_default(),
+            vector_config.is_cold(),
+            vector_config.multivector_config,
+            point_count,
+        ));
+    }
+
+    open_vector_storage(vector_config, vector_storage_path, vector_index_path)
+}
+
+/// Whether the chunked vector storage rooted at `path` has chunk files on disk.
+///
+/// Both the dense and the multi-dense appendable storages keep their chunks
+/// under the `vectors` subdirectory. A missing directory counts as "no chunks";
+/// any other error is reported as "has chunks", so the real storage open
+/// surfaces it.
+fn chunked_storage_has_chunks(path: &Path) -> bool {
+    let vectors_dir = path.join(VECTORS_DIR_PATH);
+    match fs_err::read_dir(&vectors_dir) {
+        Ok(entries) => entries.filter_map(Result::ok).any(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with(CHUNK_FILE_PREFIX))
+        }),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+        Err(_) => true,
     }
 }
 

@@ -20,7 +20,7 @@ use super::payload_storage::create_payload_storage;
 use super::sp;
 use super::sparse_vector_index::open_or_create_sparse_vector_index;
 use super::vector_index::{VectorIndexOpenArgs, open_vector_index};
-use super::vector_storage::{create_sparse_vector_storage, open_vector_storage};
+use super::vector_storage::{create_sparse_vector_storage, open_dense_vector_storage_on_load};
 use crate::common::operation_error::{OperationResult, check_process_stopped};
 use crate::id_tracker::{IdTrackerEnum, IdTrackerFormat, IdTrackerRead};
 use crate::index::VectorIndexEnum;
@@ -90,10 +90,12 @@ pub(super) fn create_segment(
         let vector_index_path = get_vector_index_path(segment_path, vector_name);
 
         let started = Instant::now();
-        let vector_storage = sp(open_vector_storage(
+        let vector_storage = sp(open_dense_vector_storage_on_load(
             vector_config,
             &vector_storage_path,
             &vector_index_path,
+            appendable_flag,
+            id_tracker.borrow().total_point_count(),
         )?);
         log_load_timing(
             segment_path,

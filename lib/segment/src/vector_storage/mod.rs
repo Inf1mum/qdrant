@@ -21,5 +21,6 @@ pub mod volatile_chunked_vectors;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use chunked_vectors::CHUNK_FILE_PREFIX;
 pub use raw_scorer::*;
 pub use vector_storage_base::*;

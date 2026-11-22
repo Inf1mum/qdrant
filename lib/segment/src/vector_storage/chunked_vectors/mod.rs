@@ -34,6 +34,9 @@ use common::universal_io::{StoredStruct, UniversalWrite};
 use self::config::Status;
 use self::read_only::ReadOnlyChunkedVectors;
 
+/// File-name prefix of every chunk file, e.g. `chunk_7.mmap`.
+pub const CHUNK_FILE_PREFIX: &str = "chunk_";
+
 /// Writable chunked vectors.
 ///
 /// Wraps the read-only view — every read goes through the [`Deref`] — and adds
